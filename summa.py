@@ -1,116 +1,89 @@
 import cv2
 import numpy as np
+ 
+def canny(img):
+    if img is None:
+        cap.release()
+        cv2.destroyAllWindows()
+        exit()
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    kernel = 5
+    blur = cv2.GaussianBlur(gray,(kernel, kernel),0)
+    canny = cv2.Canny(gray, 50, 150)
+    return canny
 
-class LaneDetect:
-    def __init__(self, start_frame):
-        self.curr_frame = cv2.resize(start_frame, (480, 320))  # Resize the input frame
-        self.temp = np.zeros_like(self.curr_frame)
-        self.temp2 = np.zeros_like(self.curr_frame)
-        self.vanishing_pt = self.curr_frame.shape[0] // 2
-        self.roi_rows = self.curr_frame.shape[0] - self.vanishing_pt
-        self.min_size = int(0.00015 * (self.curr_frame.shape[0] * self.curr_frame.shape[1]))
-        self.max_lane_width = int(0.025 * self.curr_frame.shape[1])
-        self.small_lane_area = 7 * self.min_size
-        self.long_lane = int(0.3 * self.curr_frame.shape[0])
-        self.ratio = 4
-        self.vertical_left = 2 * self.curr_frame.shape[1] // 5
-        self.vertical_right = 3 * self.curr_frame.shape[1] // 5
-        self.vertical_top = 2 * self.curr_frame.shape[0] // 3
+def region_of_interest(canny):
+    height = canny.shape[0]
+    width = canny.shape[1]
+    mask = np.zeros_like(canny)
+    triangle = np.array([[
+    (200, height),
+    (800, 350),
+    (1200, height),]], np.int32)
+    cv2.fillPoly(mask, triangle, 255)
+    masked_image = cv2.bitwise_and(canny, mask)
+    return masked_image
 
-    def update_sensitivity(self):
-        pass  # Add your implementation here
+def houghLines(cropped_canny):
+    return cv2.HoughLinesP(cropped_canny, 2, np.pi/180, 100, 
+        np.array([]), minLineLength=40, maxLineGap=5)
 
-    def get_lane(self):
-        self.mark_lane()
-        self.blob_removal()
+def addWeighted(frame, line_image):
+    return cv2.addWeighted(frame, 0.8, line_image, 1, 1)
+ 
+def display_lines(img,lines):
+    line_image = np.zeros_like(img)
+    if lines is not None:
+        for line in lines:
+            for x1, y1, x2, y2 in line:
+                cv2.line(line_image,(x1,y1),(x2,y2),(0,0,255),10)
+    return line_image
+ 
+def make_points(image, line):
+    slope, intercept = line
+    y1 = int(image.shape[0])
+    y2 = int(y1*3.0/5)      
+    x1 = int((y1 - intercept)/slope)
+    x2 = int((y2 - intercept)/slope)
+    return [[x1, y1, x2, y2]]
+ 
+def average_slope_intercept(image, lines):
+    left_fit    = []
+    right_fit   = []
+    if lines is None:
+        return None
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            fit = np.polyfit((x1,x2), (y1,y2), 1)
+            slope = fit[0]
+            intercept = fit[1]
+            if slope < 0: 
+                left_fit.append((slope, intercept))
+            else:
+                right_fit.append((slope, intercept))
+    left_fit_average  = np.average(left_fit, axis=0)
+    right_fit_average = np.average(right_fit, axis=0)
+    left_line  = make_points(image, left_fit_average)
+    right_line = make_points(image, right_fit_average)
+    averaged_lines = [left_line, right_line]
+    return averaged_lines
 
-    def mark_lane(self):
-        for i in range(self.vanishing_pt, self.curr_frame.shape[0]):
-            lane_width = 5 + self.max_lane_width * (i - self.vanishing_pt) / self.roi_rows
-            for j in range(lane_width, self.curr_frame.shape[1] - lane_width):
-                diff_l = self.curr_frame[i, j] - self.curr_frame[i, j - lane_width]
-                diff_r = self.curr_frame[i, j] - self.curr_frame[i, j + lane_width]
-                diff = diff_l + diff_r - abs(diff_l - diff_r)
-                diff_thresh_low = self.curr_frame[i, j] >> 1
-
-                if diff_l > 0 and diff_r > 0 and diff > 5:
-                    if diff >= diff_thresh_low:
-                        self.temp[i, j] = 255
-
-    def blob_removal(self):
-        self.mark_lane()
-
-        contours, _ = cv2.findContours(self.temp, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours:
-            contour_area = cv2.contourArea(contour)
-            if contour_area > self.min_size:
-                rotated_rect = cv2.minAreaRect(contour)
-                sz = rotated_rect[1]
-                bounding_width = sz[0]
-                bounding_length = sz[1]
-                blob_angle_deg = rotated_rect[2]
-
-                if bounding_width < bounding_length:
-                    blob_angle_deg = 90 + blob_angle_deg
-
-                if (bounding_length > self.long_lane or bounding_width > self.long_lane or
-                        (self.vertical_top < self.vertical_top and
-                         self.vertical_left < rotated_rect[0][0] < self.vertical_right)):
-                    cv2.drawContours(self.curr_frame, [contour], 0, 255, -1)
-                    cv2.drawContours(self.temp2, [contour], 0, 255, -1)
-                elif (-10 < blob_angle_deg < 10 or
-                        (blob_angle_deg > -70 and blob_angle_deg < 70)):
-                    if (bounding_length / bounding_width >= self.ratio or
-                            bounding_width / bounding_length >= self.ratio or
-                            (contour_area < self.small_lane_area and
-                             ((contour_area / (bounding_width * bounding_length)) > 0.75) and
-                             ((bounding_length / bounding_width) >= 2 or
-                              (bounding_width / bounding_length) >= 2))):
-                        cv2.drawContours(self.curr_frame, [contour], 0, 255, -1)
-                        cv2.drawContours(self.temp2, [contour], 0, 255, -1)
-
-    def next_frame(self, nxt):
-        self.curr_frame = cv2.resize(nxt, (480, 320))
-        self.get_lane()
-
-def make_from_vid(path):
-    cap = cv2.VideoCapture(path)
-
-    if not cap.isOpened():
-        print("Cannot open the video file")
-        return
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    print("Input video's Frame per seconds :", fps)
-
+cap = cv2.VideoCapture("test1.mp4")
+while(cap.isOpened()):
     _, frame = cap.read()
-    detect = LaneDetect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    canny_image = canny(frame)
+    cropped_canny = region_of_interest(canny_image)
+    # cv2.imshow("cropped_canny",cropped_canny)
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Cannot read the frame from video file")
-            break
+    lines = houghLines(cropped_canny)
+    averaged_lines = average_slope_intercept(frame, lines)
+    line_image = display_lines(frame, averaged_lines)
+    combo_image = addWeighted(frame, line_image)
+    cv2.imshow("result", combo_image)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        detect.next_frame(gray_frame)
+cap.release()
+cv2.destroyAllWindows()
 
-        cv2.imshow("lane", detect.curr_frame)
-        cv2.imshow("midstep", detect.temp)
-        cv2.imshow("laneBlobs", detect.temp2)
-
-        if cv2.waitKey(10) == 27:
-            print("Video paused! Press 'q' to quit, any other key to continue")
-            if cv2.waitKey(0) == ord('q'):
-                print("Terminated by user")
-                break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-def main():
-    make_from_vid("/home/yash/opencv-2.4.10/programs/output.avi")
-
-if __name__ == "__main__":
-    main()
